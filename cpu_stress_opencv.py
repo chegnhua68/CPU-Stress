@@ -1,0 +1,577 @@
+#!/usr/bin/env python3
+"""
+OpenCV CPU stress benchmark for small Linux boards.
+
+The benchmark renders synthetic scenes at common display resolutions and then
+measures image write/read, thresholding, morphology, contour extraction, and
+connected-components analysis.  It is intentionally CPU-heavy and avoids GPU
+APIs so results are useful on Raspberry Pi-like devices.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import platform
+import random
+import statistics
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable
+
+import cv2
+import numpy as np
+
+
+RESOLUTIONS: dict[str, tuple[int, int]] = {
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+    "2k": (2560, 1440),
+    "4k": (3840, 2160),
+}
+
+
+@dataclass(frozen=True)
+class Resolution:
+    name: str
+    width: int
+    height: int
+
+    @property
+    def pixels(self) -> int:
+        return self.width * self.height
+
+
+@dataclass
+class SampleResult:
+    resolution: str
+    iteration: int
+    width: int
+    height: int
+    pixels: int
+    render_ms: float
+    write_ms: float
+    read_ms: float
+    grayscale_ms: float
+    threshold_ms: float
+    morphology_ms: float
+    contours_ms: float
+    connected_components_ms: float
+    total_ms: float
+    image_size_bytes: int
+    contours: int
+    connected_components: int
+    shapes_rendered: int
+
+    def to_row(self) -> dict[str, int | float | str]:
+        return {
+            "resolution": self.resolution,
+            "iteration": self.iteration,
+            "width": self.width,
+            "height": self.height,
+            "pixels": self.pixels,
+            "render_ms": round(self.render_ms, 3),
+            "write_ms": round(self.write_ms, 3),
+            "read_ms": round(self.read_ms, 3),
+            "grayscale_ms": round(self.grayscale_ms, 3),
+            "threshold_ms": round(self.threshold_ms, 3),
+            "morphology_ms": round(self.morphology_ms, 3),
+            "contours_ms": round(self.contours_ms, 3),
+            "connected_components_ms": round(self.connected_components_ms, 3),
+            "total_ms": round(self.total_ms, 3),
+            "image_size_bytes": self.image_size_bytes,
+            "contours": self.contours,
+            "connected_components": self.connected_components,
+            "shapes_rendered": self.shapes_rendered,
+        }
+
+
+class Timer:
+    def __enter__(self) -> "Timer":
+        self.start = time.perf_counter()
+        self.elapsed_ms = 0.0
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.elapsed_ms = (time.perf_counter() - self.start) * 1000.0
+
+
+def parse_resolution(value: str) -> Resolution:
+    key = value.lower()
+    if key in RESOLUTIONS:
+        width, height = RESOLUTIONS[key]
+        return Resolution(key, width, height)
+
+    separators = ("x", "X", "*")
+    for separator in separators:
+        if separator in value:
+            raw_width, raw_height = value.split(separator, 1)
+            try:
+                width = int(raw_width.strip())
+                height = int(raw_height.strip())
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"invalid resolution '{value}', expected WIDTHxHEIGHT"
+                ) from exc
+            if width <= 0 or height <= 0:
+                raise argparse.ArgumentTypeError("resolution dimensions must be positive")
+            return Resolution(f"{width}x{height}", width, height)
+
+    known = ", ".join(RESOLUTIONS)
+    raise argparse.ArgumentTypeError(
+        f"invalid resolution '{value}', use one of: {known}, or WIDTHxHEIGHT"
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="CPU/OpenCV stress benchmark using rendered images."
+    )
+    parser.add_argument(
+        "-r",
+        "--resolutions",
+        nargs="+",
+        type=parse_resolution,
+        default=[parse_resolution("720p"), parse_resolution("1080p")],
+        help="resolutions to test: 720p 1080p 2k 4k, or custom WIDTHxHEIGHT",
+    )
+    parser.add_argument(
+        "-n",
+        "--iterations",
+        type=int,
+        default=3,
+        help="iterations per resolution",
+    )
+    parser.add_argument(
+        "--shapes",
+        type=int,
+        default=900,
+        help="base number of shapes rendered at 1080p; scales by pixel count",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("benchmark_output"),
+        help="directory for generated images and benchmark reports",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("png", "jpg", "bmp"),
+        default="png",
+        help="image format used for write/read I/O tests",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="OpenCV thread count. 0 keeps OpenCV default.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20260521,
+        help="random seed for repeatable scenes",
+    )
+    parser.add_argument(
+        "--keep-images",
+        action="store_true",
+        help="keep every generated image instead of deleting intermediate images",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="save one visual preview per resolution",
+    )
+    parser.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="optional JSON report path",
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="optional CSV report path",
+    )
+    args = parser.parse_args()
+
+    if args.iterations <= 0:
+        parser.error("--iterations must be greater than 0")
+    if args.shapes <= 0:
+        parser.error("--shapes must be greater than 0")
+    if args.threads < 0:
+        parser.error("--threads must be 0 or greater")
+
+    return args
+
+
+def ensure_output_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def timed(operation: Callable[[], object]) -> tuple[object, float]:
+    with Timer() as timer:
+        result = operation()
+    return result, timer.elapsed_ms
+
+
+def shape_count_for_resolution(base_shapes: int, resolution: Resolution) -> int:
+    base_pixels = RESOLUTIONS["1080p"][0] * RESOLUTIONS["1080p"][1]
+    scaled = int(base_shapes * (resolution.pixels / base_pixels))
+    return max(80, scaled)
+
+
+def render_scene(
+    resolution: Resolution,
+    shape_count: int,
+    rng: random.Random,
+) -> np.ndarray:
+    height, width = resolution.height, resolution.width
+    y_grid, x_grid = np.indices((height, width), dtype=np.float32)
+    diagonal = (x_grid / max(width - 1, 1)) * 115.0 + (y_grid / max(height - 1, 1)) * 95.0
+    wave = np.sin((x_grid + y_grid) / max(width / 17.0, 1.0)) * 35.0
+    base = np.clip(diagonal + wave + 35.0, 0, 255).astype(np.uint8)
+    image = cv2.merge(
+        (
+            base,
+            np.roll(base, width // 23 or 1, axis=1),
+            np.roll(base, height // 19 or 1, axis=0),
+        )
+    )
+
+    min_side = min(width, height)
+    for index in range(shape_count):
+        color = (
+            rng.randrange(25, 256),
+            rng.randrange(25, 256),
+            rng.randrange(25, 256),
+        )
+        thickness = -1 if index % 4 else rng.randrange(1, max(2, min_side // 260))
+        mode = index % 5
+
+        if mode == 0:
+            center = (rng.randrange(width), rng.randrange(height))
+            radius = rng.randrange(max(3, min_side // 160), max(5, min_side // 22))
+            cv2.circle(image, center, radius, color, thickness, lineType=cv2.LINE_AA)
+        elif mode == 1:
+            x1 = rng.randrange(width)
+            y1 = rng.randrange(height)
+            x2 = min(width - 1, x1 + rng.randrange(max(8, width // 90), max(12, width // 9)))
+            y2 = min(height - 1, y1 + rng.randrange(max(8, height // 90), max(12, height // 9)))
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, thickness, lineType=cv2.LINE_AA)
+        elif mode == 2:
+            points = np.array(
+                [
+                    [rng.randrange(width), rng.randrange(height)]
+                    for _ in range(rng.randrange(3, 8))
+                ],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(image, [points], color, lineType=cv2.LINE_AA)
+        elif mode == 3:
+            center = (rng.randrange(width), rng.randrange(height))
+            axes = (
+                rng.randrange(max(4, width // 120), max(8, width // 18)),
+                rng.randrange(max(4, height // 120), max(8, height // 18)),
+            )
+            angle = rng.randrange(0, 180)
+            cv2.ellipse(image, center, axes, angle, 0, 360, color, thickness, cv2.LINE_AA)
+        else:
+            pt1 = (rng.randrange(width), rng.randrange(height))
+            pt2 = (rng.randrange(width), rng.randrange(height))
+            line_thickness = rng.randrange(1, max(2, min_side // 180))
+            cv2.line(image, pt1, pt2, color, line_thickness, lineType=cv2.LINE_AA)
+
+    label = f"{resolution.name.upper()} OpenCV CPU benchmark"
+    font_scale = max(0.7, min_side / 950.0)
+    thickness = max(1, int(round(font_scale * 2)))
+    cv2.putText(
+        image,
+        label,
+        (max(12, width // 45), max(42, height // 16)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (245, 245, 245),
+        thickness,
+        cv2.LINE_AA,
+    )
+    return image
+
+
+def encode_params(image_format: str) -> list[int]:
+    if image_format == "jpg":
+        return [cv2.IMWRITE_JPEG_QUALITY, 92]
+    if image_format == "png":
+        return [cv2.IMWRITE_PNG_COMPRESSION, 3]
+    return []
+
+
+def image_path(output_dir: Path, resolution: Resolution, iteration: int, image_format: str) -> Path:
+    return output_dir / f"{resolution.name}_{resolution.width}x{resolution.height}_{iteration}.{image_format}"
+
+
+def write_image(path: Path, image: np.ndarray, image_format: str) -> int:
+    ok = cv2.imwrite(str(path), image, encode_params(image_format))
+    if not ok:
+        raise RuntimeError(f"OpenCV failed to write image: {path}")
+    return path.stat().st_size
+
+
+def read_image(path: Path) -> np.ndarray:
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"OpenCV failed to read image: {path}")
+    return image
+
+
+def run_sample(
+    resolution: Resolution,
+    iteration: int,
+    args: argparse.Namespace,
+    rng: random.Random,
+) -> SampleResult:
+    shape_count = shape_count_for_resolution(args.shapes, resolution)
+    total_start = time.perf_counter()
+
+    image, render_ms = timed(lambda: render_scene(resolution, shape_count, rng))
+    path = image_path(args.output_dir, resolution, iteration, args.format)
+    image_size_bytes, write_ms = timed(lambda: write_image(path, image, args.format))
+    loaded, read_ms = timed(lambda: read_image(path))
+    gray, grayscale_ms = timed(lambda: cv2.cvtColor(loaded, cv2.COLOR_BGR2GRAY))
+
+    def threshold() -> np.ndarray:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        return binary
+
+    binary, threshold_ms = timed(threshold)
+
+    kernel_size = max(3, 2 * math.ceil(min(resolution.width, resolution.height) / 720) + 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+
+    def morphology() -> np.ndarray:
+        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+        return closed
+
+    morphed, morphology_ms = timed(morphology)
+
+    def contours() -> list[np.ndarray]:
+        found, _hierarchy = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return found
+
+    found_contours, contours_ms = timed(contours)
+
+    def connected_components() -> int:
+        count, _labels, _stats, _centroids = cv2.connectedComponentsWithStats(morphed, 8, cv2.CV_32S)
+        return int(count)
+
+    component_count, connected_components_ms = timed(connected_components)
+    total_ms = (time.perf_counter() - total_start) * 1000.0
+
+    if args.preview and iteration == 1:
+        preview_path = args.output_dir / f"preview_{resolution.name}_{resolution.width}x{resolution.height}.jpg"
+        preview = cv2.resize(loaded, (min(1280, resolution.width), min(720, resolution.height)))
+        cv2.imwrite(str(preview_path), preview, [cv2.IMWRITE_JPEG_QUALITY, 88])
+
+    if not args.keep_images:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    return SampleResult(
+        resolution=resolution.name,
+        iteration=iteration,
+        width=resolution.width,
+        height=resolution.height,
+        pixels=resolution.pixels,
+        render_ms=render_ms,
+        write_ms=write_ms,
+        read_ms=read_ms,
+        grayscale_ms=grayscale_ms,
+        threshold_ms=threshold_ms,
+        morphology_ms=morphology_ms,
+        contours_ms=contours_ms,
+        connected_components_ms=connected_components_ms,
+        total_ms=total_ms,
+        image_size_bytes=image_size_bytes,
+        contours=len(found_contours),
+        connected_components=component_count,
+        shapes_rendered=shape_count,
+    )
+
+
+def mean(values: Iterable[float]) -> float:
+    values = list(values)
+    if not values:
+        return 0.0
+    return statistics.fmean(values)
+
+
+def summarize(samples: list[SampleResult]) -> list[dict[str, int | float | str]]:
+    rows: list[dict[str, int | float | str]] = []
+    by_resolution: dict[str, list[SampleResult]] = {}
+    for sample in samples:
+        by_resolution.setdefault(sample.resolution, []).append(sample)
+
+    for resolution, group in by_resolution.items():
+        pixels = group[0].pixels
+        total_ms = mean(sample.total_ms for sample in group)
+        cv_ms = mean(
+            sample.grayscale_ms
+            + sample.threshold_ms
+            + sample.morphology_ms
+            + sample.contours_ms
+            + sample.connected_components_ms
+            for sample in group
+        )
+        megapixels_per_second = (pixels / 1_000_000.0) / (total_ms / 1000.0)
+        cv_megapixels_per_second = (pixels / 1_000_000.0) / (cv_ms / 1000.0)
+
+        rows.append(
+            {
+                "resolution": resolution,
+                "width": group[0].width,
+                "height": group[0].height,
+                "iterations": len(group),
+                "avg_total_ms": round(total_ms, 3),
+                "avg_render_ms": round(mean(sample.render_ms for sample in group), 3),
+                "avg_write_ms": round(mean(sample.write_ms for sample in group), 3),
+                "avg_read_ms": round(mean(sample.read_ms for sample in group), 3),
+                "avg_threshold_ms": round(mean(sample.threshold_ms for sample in group), 3),
+                "avg_contours_ms": round(mean(sample.contours_ms for sample in group), 3),
+                "avg_connected_components_ms": round(
+                    mean(sample.connected_components_ms for sample in group), 3
+                ),
+                "avg_image_size_kib": round(mean(sample.image_size_bytes for sample in group) / 1024.0, 1),
+                "avg_contours": round(mean(sample.contours for sample in group), 1),
+                "avg_connected_components": round(
+                    mean(sample.connected_components for sample in group), 1
+                ),
+                "total_megapixels_per_second": round(megapixels_per_second, 3),
+                "opencv_megapixels_per_second": round(cv_megapixels_per_second, 3),
+            }
+        )
+    return rows
+
+
+def machine_info() -> dict[str, str | int | None]:
+    return {
+        "python": sys.version.replace("\n", " "),
+        "opencv": cv2.__version__,
+        "numpy": np.__version__,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "cpu_count": os.cpu_count(),
+        "opencv_threads": cv2.getNumThreads(),
+    }
+
+
+def write_csv(path: Path, samples: list[SampleResult]) -> None:
+    ensure_output_dir(path.parent)
+    rows = [sample.to_row() for sample in samples]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_json(
+    path: Path,
+    samples: list[SampleResult],
+    summary: list[dict[str, int | float | str]],
+) -> None:
+    ensure_output_dir(path.parent)
+    payload = {
+        "machine": machine_info(),
+        "summary": summary,
+        "samples": [sample.to_row() for sample in samples],
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def print_summary(summary: list[dict[str, int | float | str]]) -> None:
+    headers = (
+        "resolution",
+        "avg_total_ms",
+        "avg_write_ms",
+        "avg_read_ms",
+        "avg_threshold_ms",
+        "avg_contours_ms",
+        "avg_connected_components_ms",
+        "opencv_megapixels_per_second",
+    )
+    widths = {
+        header: max(len(header), *(len(str(row[header])) for row in summary))
+        for header in headers
+    }
+    print()
+    print("Summary")
+    print(" ".join(header.ljust(widths[header]) for header in headers))
+    print(" ".join("-" * widths[header] for header in headers))
+    for row in summary:
+        print(" ".join(str(row[header]).ljust(widths[header]) for header in headers))
+
+
+def main() -> int:
+    args = parse_args()
+    ensure_output_dir(args.output_dir)
+
+    if args.threads:
+        cv2.setNumThreads(args.threads)
+
+    samples: list[SampleResult] = []
+    rng = random.Random(args.seed)
+
+    print("OpenCV CPU stress benchmark")
+    print(f"Python: {sys.version.split()[0]}")
+    print(f"OpenCV: {cv2.__version__}")
+    print(f"Output: {args.output_dir.resolve()}")
+    print(f"OpenCV threads: {cv2.getNumThreads()}")
+
+    try:
+        for resolution in args.resolutions:
+            shape_count = shape_count_for_resolution(args.shapes, resolution)
+            print(
+                f"\nTesting {resolution.name} "
+                f"({resolution.width}x{resolution.height}, {shape_count} shapes)"
+            )
+            for iteration in range(1, args.iterations + 1):
+                sample = run_sample(resolution, iteration, args, rng)
+                samples.append(sample)
+                print(
+                    f"  #{iteration}: total={sample.total_ms:.1f} ms, "
+                    f"write={sample.write_ms:.1f} ms, read={sample.read_ms:.1f} ms, "
+                    f"threshold={sample.threshold_ms:.1f} ms, "
+                    f"components={sample.connected_components_ms:.1f} ms"
+                )
+    except KeyboardInterrupt:
+        print("\nInterrupted by user.", file=sys.stderr)
+        return 130
+
+    if not samples:
+        print("No benchmark samples were produced.", file=sys.stderr)
+        return 1
+
+    summary = summarize(samples)
+    print_summary(summary)
+
+    csv_path = args.csv or args.output_dir / "samples.csv"
+    json_path = args.json or args.output_dir / "report.json"
+    write_csv(csv_path, samples)
+    write_json(json_path, samples, summary)
+    print(f"\nCSV report: {csv_path.resolve()}")
+    print(f"JSON report: {json_path.resolve()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
