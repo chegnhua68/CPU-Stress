@@ -213,6 +213,11 @@ def parse_args() -> argparse.Namespace:
         help="save one visual preview per resolution",
     )
     parser.add_argument(
+        "--save-stages",
+        action="store_true",
+        help="save processed images: grayscale, binary, morphology, contours, and components",
+    )
+    parser.add_argument(
         "--json",
         type=Path,
         default=None,
@@ -389,6 +394,11 @@ def image_path(
     return output_dir / f"{stem}_{resolution.name}_{resolution.width}x{resolution.height}_{iteration}.{image_format}"
 
 
+def output_stem(source_image: Path | None, resolution: Resolution, iteration: int) -> str:
+    stem = safe_stem(source_image)
+    return f"{stem}_{resolution.name}_{resolution.width}x{resolution.height}_{iteration}"
+
+
 def write_image(path: Path, image: np.ndarray, image_format: str) -> int:
     ok = cv2.imwrite(str(path), image, encode_params(image_format))
     if not ok:
@@ -401,6 +411,68 @@ def read_image(path: Path) -> np.ndarray:
     if image is None:
         raise RuntimeError(f"OpenCV failed to read image: {path}")
     return image
+
+
+def preview_size(width: int, height: int, max_width: int = 1280, max_height: int = 720) -> tuple[int, int]:
+    scale = min(max_width / width, max_height / height, 1.0)
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+
+
+def colorize_components(labels: np.ndarray, component_count: int) -> np.ndarray:
+    if component_count <= 1:
+        return np.zeros((*labels.shape, 3), dtype=np.uint8)
+
+    hue = ((labels.astype(np.uint32) * 37) % 180).astype(np.uint8)
+    saturation = np.full(labels.shape, 210, dtype=np.uint8)
+    value = np.where(labels > 0, 255, 0).astype(np.uint8)
+    hsv = cv2.merge((hue, saturation, value))
+    colorized = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    colorized[labels == 0] = (0, 0, 0)
+    return colorized
+
+
+def save_processed_images(
+    output_dir: Path,
+    source_image: Path | None,
+    resolution: Resolution,
+    iteration: int,
+    loaded: np.ndarray,
+    gray: np.ndarray,
+    binary: np.ndarray,
+    morphed: np.ndarray,
+    contours: list[np.ndarray],
+    labels: np.ndarray,
+    component_count: int,
+) -> list[str]:
+    stage_dir = output_dir / "processed"
+    ensure_output_dir(stage_dir)
+    stem = output_stem(source_image, resolution, iteration)
+    saved_paths: list[Path] = []
+
+    contour_overlay = loaded.copy()
+    cv2.drawContours(contour_overlay, contours, -1, (0, 255, 255), max(1, min(resolution.width, resolution.height) // 900))
+
+    component_overlay = cv2.addWeighted(
+        loaded,
+        0.55,
+        colorize_components(labels, component_count),
+        0.45,
+        0,
+    )
+
+    outputs = {
+        "gray": gray,
+        "binary": binary,
+        "morphology": morphed,
+        "contours": contour_overlay,
+        "components": component_overlay,
+    }
+    for stage_name, image in outputs.items():
+        path = stage_dir / f"{stem}_{stage_name}.jpg"
+        cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        saved_paths.append(path)
+
+    return [str(path.resolve()) for path in saved_paths]
 
 
 def run_sample(
@@ -452,17 +524,33 @@ def run_sample(
 
     found_contours, contours_ms = timed(contours)
 
-    def connected_components() -> int:
-        count, _labels, _stats, _centroids = cv2.connectedComponentsWithStats(morphed, 8, cv2.CV_32S)
-        return int(count)
+    def connected_components() -> tuple[int, np.ndarray]:
+        count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(morphed, 8, cv2.CV_32S)
+        return int(count), labels
 
-    component_count, connected_components_ms = timed(connected_components)
+    component_result, connected_components_ms = timed(connected_components)
+    component_count, labels = component_result
     total_ms = (time.perf_counter() - total_start) * 1000.0
 
     if args.preview and iteration == 1:
-        preview_path = args.output_dir / f"preview_{resolution.name}_{resolution.width}x{resolution.height}.jpg"
-        preview = cv2.resize(loaded, (min(1280, resolution.width), min(720, resolution.height)))
+        preview_path = args.output_dir / f"{output_stem(source_image, resolution, iteration)}_preview.jpg"
+        preview = cv2.resize(loaded, preview_size(resolution.width, resolution.height))
         cv2.imwrite(str(preview_path), preview, [cv2.IMWRITE_JPEG_QUALITY, 88])
+
+    if args.save_stages:
+        save_processed_images(
+            args.output_dir,
+            source_image,
+            resolution,
+            iteration,
+            loaded,
+            gray,
+            binary,
+            morphed,
+            found_contours,
+            labels,
+            component_count,
+        )
 
     if not args.keep_images:
         try:

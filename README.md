@@ -83,6 +83,12 @@ python3.11 cpu_stress_opencv.py --synthetic -r 1600x900 -n 5
 python3.11 cpu_stress_opencv.py --preview --keep-images
 ```
 
+保存处理后的图片，包括灰度图、二值化图、形态学结果、轮廓叠加图和连通域伪彩色图：
+
+```bash
+python3.11 cpu_stress_opencv.py -n 1 --save-stages --preview
+```
+
 限制 OpenCV 线程数，便于做单线程或固定线程对比：
 
 ```bash
@@ -114,6 +120,7 @@ python3.11 cpu_stress_opencv.py --synthetic -r 720p 1080p -n 3
 - `samples.csv`：每一次迭代的详细耗时
 - `report.json`：机器信息、汇总结果、详细样本
 - `preview_*.jpg`：使用 `--preview` 时生成的预览图
+- `processed/*.jpg`：使用 `--save-stages` 时生成的处理结果图
 
 终端中会显示类似：
 
@@ -141,6 +148,7 @@ resolution avg_total_ms avg_write_ms avg_read_ms avg_threshold_ms ...
 --seed               随机种子，便于复现实验
 --keep-images        保留每轮生成的图片
 --preview            每个分辨率保存一张预览图
+--save-stages        保存灰度、二值化、形态学、轮廓、连通域处理结果图
 --json               指定 JSON 报告路径
 --csv                指定 CSV 报告路径
 ```
