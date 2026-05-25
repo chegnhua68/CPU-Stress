@@ -35,6 +35,9 @@ RESOLUTIONS: dict[str, tuple[int, int]] = {
     "4k": (3840, 2160),
 }
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+PICTURE_EXTENSIONS = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+
 
 @dataclass(frozen=True)
 class Resolution:
@@ -49,6 +52,8 @@ class Resolution:
 
 @dataclass
 class SampleResult:
+    source: str
+    source_image: str
     resolution: str
     iteration: int
     width: int
@@ -70,6 +75,8 @@ class SampleResult:
 
     def to_row(self) -> dict[str, int | float | str]:
         return {
+            "source": self.source,
+            "source_image": self.source_image,
             "resolution": self.resolution,
             "iteration": self.iteration,
             "width": self.width,
@@ -130,7 +137,7 @@ def parse_resolution(value: str) -> Resolution:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="CPU/OpenCV stress benchmark using rendered images."
+        description="CPU/OpenCV stress benchmark using project pictures or rendered images."
     )
     parser.add_argument(
         "-r",
@@ -152,6 +159,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=900,
         help="base number of shapes rendered at 1080p; scales by pixel count",
+    )
+    parser.add_argument(
+        "--picture-dir",
+        type=Path,
+        default=Path("pictures"),
+        help="directory with source pictures, relative paths are resolved from the project root",
+    )
+    parser.add_argument(
+        "--source-image",
+        type=Path,
+        default=None,
+        help="use one specific source image instead of scanning --picture-dir",
+    )
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="ignore pictures and use the generated synthetic scene",
     )
     parser.add_argument(
         "--output-dir",
@@ -207,8 +231,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--shapes must be greater than 0")
     if args.threads < 0:
         parser.error("--threads must be 0 or greater")
+    if args.synthetic and args.source_image:
+        parser.error("--synthetic cannot be used with --source-image")
 
     return args
+
+
+def project_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
 def ensure_output_dir(path: Path) -> None:
@@ -304,6 +336,48 @@ def render_scene(
     return image
 
 
+def discover_pictures(path: Path) -> list[Path]:
+    resolved = project_path(path)
+    if resolved.is_file():
+        if resolved.suffix.lower() in PICTURE_EXTENSIONS:
+            return [resolved]
+        return []
+    if not resolved.is_dir():
+        return []
+    return sorted(
+        file
+        for file in resolved.rglob("*")
+        if file.is_file() and file.suffix.lower() in PICTURE_EXTENSIONS
+    )
+
+
+def resize_cover(image: np.ndarray, resolution: Resolution) -> np.ndarray:
+    target_ratio = resolution.width / resolution.height
+    source_height, source_width = image.shape[:2]
+    source_ratio = source_width / source_height
+
+    if source_ratio > target_ratio:
+        crop_width = int(round(source_height * target_ratio))
+        x0 = max(0, (source_width - crop_width) // 2)
+        cropped = image[:, x0 : x0 + crop_width]
+    else:
+        crop_height = int(round(source_width / target_ratio))
+        y0 = max(0, (source_height - crop_height) // 2)
+        cropped = image[y0 : y0 + crop_height, :]
+
+    interpolation = cv2.INTER_AREA
+    if cropped.shape[1] < resolution.width or cropped.shape[0] < resolution.height:
+        interpolation = cv2.INTER_CUBIC
+    return cv2.resize(cropped, (resolution.width, resolution.height), interpolation=interpolation)
+
+
+def load_picture_scene(source_image: Path, resolution: Resolution) -> np.ndarray:
+    image = cv2.imread(str(source_image), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"OpenCV failed to read source image: {source_image}")
+    return resize_cover(image, resolution)
+
+
 def encode_params(image_format: str) -> list[int]:
     if image_format == "jpg":
         return [cv2.IMWRITE_JPEG_QUALITY, 92]
@@ -335,11 +409,20 @@ def run_sample(
     iteration: int,
     args: argparse.Namespace,
     rng: random.Random,
+    source_image: Path | None,
 ) -> SampleResult:
-    shape_count = shape_count_for_resolution(args.shapes, resolution)
+    shape_count = 0 if source_image else shape_count_for_resolution(args.shapes, resolution)
     total_start = time.perf_counter()
 
-    image, render_ms = timed(lambda: render_scene(resolution, shape_count, rng))
+    if source_image:
+        image, render_ms = timed(lambda: load_picture_scene(source_image, resolution))
+        source = "picture"
+        source_name = str(source_image.relative_to(PROJECT_ROOT)) if source_image.is_relative_to(PROJECT_ROOT) else str(source_image)
+    else:
+        image, render_ms = timed(lambda: render_scene(resolution, shape_count, rng))
+        source = "synthetic"
+        source_name = "generated"
+
     path = image_path(args.output_dir, resolution, iteration, args.format)
     image_size_bytes, write_ms = timed(lambda: write_image(path, image, args.format))
     loaded, read_ms = timed(lambda: read_image(path))
@@ -387,6 +470,8 @@ def run_sample(
             pass
 
     return SampleResult(
+        source=source,
+        source_image=source_name,
         resolution=resolution.name,
         iteration=iteration,
         width=resolution.width,
@@ -530,22 +615,39 @@ def main() -> int:
 
     samples: list[SampleResult] = []
     rng = random.Random(args.seed)
+    source_images: list[Path] = []
+    if args.source_image:
+        source_images = discover_pictures(args.source_image)
+        if not source_images:
+            print(f"No supported source image found: {project_path(args.source_image)}", file=sys.stderr)
+            return 2
+    elif not args.synthetic:
+        source_images = discover_pictures(args.picture_dir)
 
     print("OpenCV CPU stress benchmark")
     print(f"Python: {sys.version.split()[0]}")
     print(f"OpenCV: {cv2.__version__}")
     print(f"Output: {args.output_dir.resolve()}")
     print(f"OpenCV threads: {cv2.getNumThreads()}")
+    if source_images:
+        print(f"Picture source: {len(source_images)} image(s)")
+        print(f"First image: {source_images[0]}")
+    elif args.synthetic:
+        print("Picture source: synthetic scene forced by --synthetic")
+    else:
+        print(f"Picture source: no images found in {project_path(args.picture_dir)}, using synthetic scene")
 
     try:
         for resolution in args.resolutions:
             shape_count = shape_count_for_resolution(args.shapes, resolution)
+            source_label = "pictures" if source_images else f"{shape_count} synthetic shapes"
             print(
                 f"\nTesting {resolution.name} "
-                f"({resolution.width}x{resolution.height}, {shape_count} shapes)"
+                f"({resolution.width}x{resolution.height}, {source_label})"
             )
             for iteration in range(1, args.iterations + 1):
-                sample = run_sample(resolution, iteration, args, rng)
+                source_image = source_images[(iteration - 1) % len(source_images)] if source_images else None
+                sample = run_sample(resolution, iteration, args, rng, source_image)
                 samples.append(sample)
                 print(
                     f"  #{iteration}: total={sample.total_ms:.1f} ms, "

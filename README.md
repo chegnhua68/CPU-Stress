@@ -1,10 +1,12 @@
 # Linux CPU/OpenCV 压力测试
 
-这是一个面向树莓派、香橙派、工控小主机等小体型 Linux 设备的 CPU/OpenCV 压力测试工具。它会渲染不同分辨率的合成图片，并测试 OpenCV 在图片读写、二值化、形态学、轮廓提取和连通域分析上的表现，效果接近一个轻量版的 Cinebench 图像场景压测。
+这是一个面向树莓派、香橙派、工控小主机等小体型 Linux 设备的 CPU/OpenCV 压力测试工具。它会优先读取项目 `pictures/` 目录中的图片，按不同分辨率缩放/裁剪后测试 OpenCV 在图片读写、二值化、形态学、轮廓提取和连通域分析上的表现；如果没有图片，也可以自动回退到合成渲染场景，效果接近一个轻量版的 Cinebench 图像场景压测。
 
 ## 测试内容
 
-- 渲染 720p / 1080p / 2K / 4K 或自定义分辨率图片
+- 读取 `pictures/` 中的 PNG/JPG/BMP/TIFF/WebP 图片
+- 缩放/裁剪到 720p / 1080p / 2K / 4K 或自定义分辨率
+- 在没有输入图片时渲染合成测试图片
 - 测试 `cv2.imwrite` 写图片性能
 - 测试 `cv2.imread` 读图片性能
 - 测试灰度转换、Gaussian blur、Otsu 二值化
@@ -49,6 +51,14 @@ E:\Software\Scoop\Apps\apps\python311\current\python.exe cpu_stress_opencv.py -r
 
 ## 快速运行
 
+默认会扫描项目根目录下的 `pictures/` 文件夹。当前仓库中可放置例如：
+
+```text
+pictures/linux_penguin_max_upscaled_8192x8192.png
+```
+
+在树莓派等 Linux 设备上，保持目录名为小写 `pictures` 即可；Linux 文件名区分大小写，所以不要写成 `Pictures` 或 `picture`。
+
 默认测试 720p 和 1080p，每个分辨率跑 3 次：
 
 ```bash
@@ -79,6 +89,24 @@ python3.11 cpu_stress_opencv.py -r 1080p 2k --preview --keep-images
 python3.11 cpu_stress_opencv.py -r 1080p 2k -n 5 --threads 1
 ```
 
+指定其他图片目录：
+
+```bash
+python3.11 cpu_stress_opencv.py --picture-dir pictures -r 720p 1080p -n 3
+```
+
+指定单张图片：
+
+```bash
+python3.11 cpu_stress_opencv.py --source-image pictures/linux_penguin_max_upscaled_8192x8192.png -r 720p -n 3
+```
+
+强制使用合成渲染场景，不读取 `pictures/`：
+
+```bash
+python3.11 cpu_stress_opencv.py --synthetic -r 720p 1080p -n 3
+```
+
 ## 输出结果
 
 默认输出到 `benchmark_output/`：
@@ -104,6 +132,9 @@ resolution avg_total_ms avg_write_ms avg_read_ms avg_threshold_ms ...
 -r, --resolutions    分辨率，可选 720p 1080p 2k 4k 或 WIDTHxHEIGHT
 -n, --iterations     每个分辨率重复次数
 --shapes             1080p 下基础图形数量，其他分辨率按像素比例缩放
+--picture-dir        图片目录，默认 pictures；相对路径会从项目根目录解析
+--source-image       指定单张输入图片
+--synthetic          强制使用合成图片，不扫描 pictures
 --output-dir         输出目录
 --format             图片格式：png、jpg、bmp
 --threads            OpenCV 线程数，0 表示使用默认值
@@ -116,6 +147,7 @@ resolution avg_total_ms avg_write_ms avg_read_ms avg_threshold_ms ...
 
 ## 嵌入式 Linux 测试建议
 
+- 把测试图片放进项目的 `pictures/` 目录，树莓派上 clone 后可直接识别
 - 先跑 `720p` 和 `1080p`，确认内存、散热和依赖没有问题后再跑 `2k`、`4k`
 - 使用相同 `--seed`、`--iterations`、`--format` 对比不同机器
 - 想更关注 CPU 图像算法性能，可使用 `--format bmp` 降低压缩编码影响
