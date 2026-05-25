@@ -2,10 +2,11 @@
 """
 OpenCV CPU stress benchmark for small Linux boards.
 
-The benchmark renders synthetic scenes at common display resolutions and then
-measures image write/read, thresholding, morphology, contour extraction, and
-connected-components analysis.  It is intentionally CPU-heavy and avoids GPU
-APIs so results are useful on Raspberry Pi-like devices.
+The benchmark analyzes source pictures at their original resolution, or renders
+synthetic scenes at common display resolutions when requested. It measures image
+write/read, thresholding, morphology, contour extraction, and connected-
+components analysis. It avoids GPU APIs so results are useful on Raspberry
+Pi-like devices.
 """
 
 from __future__ import annotations
@@ -145,7 +146,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         type=parse_resolution,
         default=[parse_resolution("720p"), parse_resolution("1080p")],
-        help="resolutions to test: 720p 1080p 2k 4k, or custom WIDTHxHEIGHT",
+        help="synthetic fallback resolutions: 720p 1080p 2k 4k, or custom WIDTHxHEIGHT",
     )
     parser.add_argument(
         "-n",
@@ -351,31 +352,16 @@ def discover_pictures(path: Path) -> list[Path]:
     )
 
 
-def resize_cover(image: np.ndarray, resolution: Resolution) -> np.ndarray:
-    target_ratio = resolution.width / resolution.height
-    source_height, source_width = image.shape[:2]
-    source_ratio = source_width / source_height
-
-    if source_ratio > target_ratio:
-        crop_width = int(round(source_height * target_ratio))
-        x0 = max(0, (source_width - crop_width) // 2)
-        cropped = image[:, x0 : x0 + crop_width]
-    else:
-        crop_height = int(round(source_width / target_ratio))
-        y0 = max(0, (source_height - crop_height) // 2)
-        cropped = image[y0 : y0 + crop_height, :]
-
-    interpolation = cv2.INTER_AREA
-    if cropped.shape[1] < resolution.width or cropped.shape[0] < resolution.height:
-        interpolation = cv2.INTER_CUBIC
-    return cv2.resize(cropped, (resolution.width, resolution.height), interpolation=interpolation)
+def resolution_from_image(name: str, image: np.ndarray) -> Resolution:
+    height, width = image.shape[:2]
+    return Resolution(name=f"{width}x{height}", width=width, height=height)
 
 
-def load_picture_scene(source_image: Path, resolution: Resolution) -> np.ndarray:
+def load_picture_scene(source_image: Path) -> np.ndarray:
     image = cv2.imread(str(source_image), cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"OpenCV failed to read source image: {source_image}")
-    return resize_cover(image, resolution)
+    return image
 
 
 def encode_params(image_format: str) -> list[int]:
@@ -386,8 +372,21 @@ def encode_params(image_format: str) -> list[int]:
     return []
 
 
-def image_path(output_dir: Path, resolution: Resolution, iteration: int, image_format: str) -> Path:
-    return output_dir / f"{resolution.name}_{resolution.width}x{resolution.height}_{iteration}.{image_format}"
+def safe_stem(path: Path | None) -> str:
+    if path is None:
+        return "synthetic"
+    return "".join(character if character.isalnum() or character in ("-", "_") else "_" for character in path.stem)
+
+
+def image_path(
+    output_dir: Path,
+    resolution: Resolution,
+    iteration: int,
+    image_format: str,
+    source_image: Path | None,
+) -> Path:
+    stem = safe_stem(source_image)
+    return output_dir / f"{stem}_{resolution.name}_{resolution.width}x{resolution.height}_{iteration}.{image_format}"
 
 
 def write_image(path: Path, image: np.ndarray, image_format: str) -> int:
@@ -405,25 +404,27 @@ def read_image(path: Path) -> np.ndarray:
 
 
 def run_sample(
-    resolution: Resolution,
+    requested_resolution: Resolution,
     iteration: int,
     args: argparse.Namespace,
     rng: random.Random,
     source_image: Path | None,
 ) -> SampleResult:
-    shape_count = 0 if source_image else shape_count_for_resolution(args.shapes, resolution)
+    shape_count = 0 if source_image else shape_count_for_resolution(args.shapes, requested_resolution)
     total_start = time.perf_counter()
 
     if source_image:
-        image, render_ms = timed(lambda: load_picture_scene(source_image, resolution))
+        image, render_ms = timed(lambda: load_picture_scene(source_image))
+        resolution = resolution_from_image(source_image.stem, image)
         source = "picture"
         source_name = str(source_image.relative_to(PROJECT_ROOT)) if source_image.is_relative_to(PROJECT_ROOT) else str(source_image)
     else:
-        image, render_ms = timed(lambda: render_scene(resolution, shape_count, rng))
+        image, render_ms = timed(lambda: render_scene(requested_resolution, shape_count, rng))
+        resolution = requested_resolution
         source = "synthetic"
         source_name = "generated"
 
-    path = image_path(args.output_dir, resolution, iteration, args.format)
+    path = image_path(args.output_dir, resolution, iteration, args.format, source_image)
     image_size_bytes, write_ms = timed(lambda: write_image(path, image, args.format))
     loaded, read_ms = timed(lambda: read_image(path))
     gray, grayscale_ms = timed(lambda: cv2.cvtColor(loaded, cv2.COLOR_BGR2GRAY))
@@ -638,23 +639,35 @@ def main() -> int:
         print(f"Picture source: no images found in {project_path(args.picture_dir)}, using synthetic scene")
 
     try:
-        for resolution in args.resolutions:
-            shape_count = shape_count_for_resolution(args.shapes, resolution)
-            source_label = "pictures" if source_images else f"{shape_count} synthetic shapes"
-            print(
-                f"\nTesting {resolution.name} "
-                f"({resolution.width}x{resolution.height}, {source_label})"
-            )
-            for iteration in range(1, args.iterations + 1):
-                source_image = source_images[(iteration - 1) % len(source_images)] if source_images else None
-                sample = run_sample(resolution, iteration, args, rng, source_image)
-                samples.append(sample)
+        if source_images:
+            for source_image in source_images:
+                print(f"\nTesting image {source_image}")
+                for iteration in range(1, args.iterations + 1):
+                    sample = run_sample(args.resolutions[0], iteration, args, rng, source_image)
+                    samples.append(sample)
+                    print(
+                        f"  #{iteration}: {sample.width}x{sample.height}, "
+                        f"total={sample.total_ms:.1f} ms, "
+                        f"write={sample.write_ms:.1f} ms, read={sample.read_ms:.1f} ms, "
+                        f"threshold={sample.threshold_ms:.1f} ms, "
+                        f"components={sample.connected_components_ms:.1f} ms"
+                    )
+        else:
+            for resolution in args.resolutions:
+                shape_count = shape_count_for_resolution(args.shapes, resolution)
                 print(
-                    f"  #{iteration}: total={sample.total_ms:.1f} ms, "
-                    f"write={sample.write_ms:.1f} ms, read={sample.read_ms:.1f} ms, "
-                    f"threshold={sample.threshold_ms:.1f} ms, "
-                    f"components={sample.connected_components_ms:.1f} ms"
+                    f"\nTesting synthetic {resolution.name} "
+                    f"({resolution.width}x{resolution.height}, {shape_count} shapes)"
                 )
+                for iteration in range(1, args.iterations + 1):
+                    sample = run_sample(resolution, iteration, args, rng, None)
+                    samples.append(sample)
+                    print(
+                        f"  #{iteration}: total={sample.total_ms:.1f} ms, "
+                        f"write={sample.write_ms:.1f} ms, read={sample.read_ms:.1f} ms, "
+                        f"threshold={sample.threshold_ms:.1f} ms, "
+                        f"components={sample.connected_components_ms:.1f} ms"
+                    )
     except KeyboardInterrupt:
         print("\nInterrupted by user.", file=sys.stderr)
         return 130

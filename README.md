@@ -1,11 +1,11 @@
 # Linux CPU/OpenCV 压力测试
 
-这是一个面向树莓派、香橙派、工控小主机等小体型 Linux 设备的 CPU/OpenCV 压力测试工具。它会优先读取项目 `pictures/` 目录中的图片，按不同分辨率缩放/裁剪后测试 OpenCV 在图片读写、二值化、形态学、轮廓提取和连通域分析上的表现；如果没有图片，也可以自动回退到合成渲染场景，效果接近一个轻量版的 Cinebench 图像场景压测。
+这是一个面向树莓派、香橙派、工控小主机等小体型 Linux 设备的 CPU/OpenCV 压力测试工具。它会优先读取项目 `pictures/` 目录中的图片，并按图片原始分辨率测试 OpenCV 在图片读写、二值化、形态学、轮廓提取和连通域分析上的表现；如果没有图片，也可以自动回退到合成渲染场景，效果接近一个轻量版的 Cinebench 图像场景压测。
 
 ## 测试内容
 
 - 读取 `pictures/` 中的 PNG/JPG/BMP/TIFF/WebP 图片
-- 缩放/裁剪到 720p / 1080p / 2K / 4K 或自定义分辨率
+- 分析任意分辨率的原图，不缩放、不裁剪
 - 在没有输入图片时渲染合成测试图片
 - 测试 `cv2.imwrite` 写图片性能
 - 测试 `cv2.imread` 读图片性能
@@ -43,10 +43,10 @@ E:\Software\Scoop\Apps\apps\python311\current\python.exe check_env.py
 
 如果当前 Windows 机器只有 Scoop 的新版 Python，例如 Python 3.14，而 NumPy/OpenCV wheel 不稳定，请不要用它作为最终测试环境；在 Linux 目标机上使用 Python 3.11 虚拟环境更可靠。
 
-在你当前这台 Windows 机器上，也可以直接用 Scoop 的 Python 3.11 做功能验证：
+在你当前这台 Windows 机器上，也可以直接用 Scoop 的 Python 3.11 做功能验证。默认会读取 `pictures/` 中的原图分辨率：
 
 ```powershell
-E:\Software\Scoop\Apps\apps\python311\current\python.exe cpu_stress_opencv.py -r 720p 1080p -n 3
+E:\Software\Scoop\Apps\apps\python311\current\python.exe cpu_stress_opencv.py -n 3
 ```
 
 ## 快速运行
@@ -59,46 +59,46 @@ pictures/linux_penguin_max_upscaled_8192x8192.png
 
 在树莓派等 Linux 设备上，保持目录名为小写 `pictures` 即可；Linux 文件名区分大小写，所以不要写成 `Pictures` 或 `picture`。
 
-默认测试 720p 和 1080p，每个分辨率跑 3 次：
+默认扫描 `pictures/`，每张图片按原始分辨率跑 3 次：
 
 ```bash
 python3.11 cpu_stress_opencv.py
 ```
 
-测试 720p / 1080p / 2K / 4K：
+如果 `pictures/` 中没有图片，会自动回退到合成图片模式。也可以主动指定合成图片分辨率：
 
 ```bash
-python3.11 cpu_stress_opencv.py -r 720p 1080p 2k 4k -n 3
+python3.11 cpu_stress_opencv.py --synthetic -r 720p 1080p 2k 4k -n 3
 ```
 
-自定义分辨率，例如 1600x900：
+合成图片自定义分辨率，例如 1600x900：
 
 ```bash
-python3.11 cpu_stress_opencv.py -r 1600x900 -n 5
+python3.11 cpu_stress_opencv.py --synthetic -r 1600x900 -n 5
 ```
 
 保存预览图和每轮生成的原图：
 
 ```bash
-python3.11 cpu_stress_opencv.py -r 1080p 2k --preview --keep-images
+python3.11 cpu_stress_opencv.py --preview --keep-images
 ```
 
 限制 OpenCV 线程数，便于做单线程或固定线程对比：
 
 ```bash
-python3.11 cpu_stress_opencv.py -r 1080p 2k -n 5 --threads 1
+python3.11 cpu_stress_opencv.py -n 5 --threads 1
 ```
 
 指定其他图片目录：
 
 ```bash
-python3.11 cpu_stress_opencv.py --picture-dir pictures -r 720p 1080p -n 3
+python3.11 cpu_stress_opencv.py --picture-dir pictures -n 3
 ```
 
 指定单张图片：
 
 ```bash
-python3.11 cpu_stress_opencv.py --source-image pictures/linux_penguin_max_upscaled_8192x8192.png -r 720p -n 3
+python3.11 cpu_stress_opencv.py --source-image pictures/linux_penguin_max_upscaled_8192x8192.png -n 3
 ```
 
 强制使用合成渲染场景，不读取 `pictures/`：
@@ -129,9 +129,9 @@ resolution avg_total_ms avg_write_ms avg_read_ms avg_threshold_ms ...
 ## 参数
 
 ```text
--r, --resolutions    分辨率，可选 720p 1080p 2k 4k 或 WIDTHxHEIGHT
+-r, --resolutions    合成图片分辨率，可选 720p 1080p 2k 4k 或 WIDTHxHEIGHT
 -n, --iterations     每个分辨率重复次数
---shapes             1080p 下基础图形数量，其他分辨率按像素比例缩放
+--shapes             合成模式下 1080p 的基础图形数量，其他分辨率按像素比例缩放
 --picture-dir        图片目录，默认 pictures；相对路径会从项目根目录解析
 --source-image       指定单张输入图片
 --synthetic          强制使用合成图片，不扫描 pictures
