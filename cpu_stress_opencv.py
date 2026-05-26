@@ -60,18 +60,35 @@ class SampleResult:
     width: int
     height: int
     pixels: int
+    input_read_ms: float
     render_ms: float
+    benchmark_write_ms: float
+    benchmark_read_ms: float
     write_ms: float
     read_ms: float
     grayscale_ms: float
     threshold_ms: float
+    gaussian_blur_ms: float
+    otsu_threshold_ms: float
     morphology_ms: float
+    morphology_open_ms: float
+    morphology_close_ms: float
     contours_ms: float
     connected_components_ms: float
+    centroid_ms: float
+    centroid_avg_us: float
+    centroid_rate_per_second: float
+    core_compute_ms: float
+    stage_compute_ms: float
+    stage_write_ms: float
+    preview_write_ms: float
+    output_write_ms: float
+    processed_pipeline_ms: float
     total_ms: float
     image_size_bytes: int
     contours: int
     connected_components: int
+    centroids: int
     shapes_rendered: int
 
     def to_row(self) -> dict[str, int | float | str]:
@@ -83,18 +100,35 @@ class SampleResult:
             "width": self.width,
             "height": self.height,
             "pixels": self.pixels,
+            "input_read_ms": round(self.input_read_ms, 3),
             "render_ms": round(self.render_ms, 3),
+            "benchmark_write_ms": round(self.benchmark_write_ms, 3),
+            "benchmark_read_ms": round(self.benchmark_read_ms, 3),
             "write_ms": round(self.write_ms, 3),
             "read_ms": round(self.read_ms, 3),
             "grayscale_ms": round(self.grayscale_ms, 3),
             "threshold_ms": round(self.threshold_ms, 3),
+            "gaussian_blur_ms": round(self.gaussian_blur_ms, 3),
+            "otsu_threshold_ms": round(self.otsu_threshold_ms, 3),
             "morphology_ms": round(self.morphology_ms, 3),
+            "morphology_open_ms": round(self.morphology_open_ms, 3),
+            "morphology_close_ms": round(self.morphology_close_ms, 3),
             "contours_ms": round(self.contours_ms, 3),
             "connected_components_ms": round(self.connected_components_ms, 3),
+            "centroid_ms": round(self.centroid_ms, 3),
+            "centroid_avg_us": round(self.centroid_avg_us, 3),
+            "centroid_rate_per_second": round(self.centroid_rate_per_second, 3),
+            "core_compute_ms": round(self.core_compute_ms, 3),
+            "stage_compute_ms": round(self.stage_compute_ms, 3),
+            "stage_write_ms": round(self.stage_write_ms, 3),
+            "preview_write_ms": round(self.preview_write_ms, 3),
+            "output_write_ms": round(self.output_write_ms, 3),
+            "processed_pipeline_ms": round(self.processed_pipeline_ms, 3),
             "total_ms": round(self.total_ms, 3),
             "image_size_bytes": self.image_size_bytes,
             "contours": self.contours,
             "connected_components": self.connected_components,
+            "centroids": self.centroids,
             "shapes_rendered": self.shapes_rendered,
         }
 
@@ -431,11 +465,7 @@ def colorize_components(labels: np.ndarray, component_count: int) -> np.ndarray:
     return colorized
 
 
-def save_processed_images(
-    output_dir: Path,
-    source_image: Path | None,
-    resolution: Resolution,
-    iteration: int,
+def build_processed_images(
     loaded: np.ndarray,
     gray: np.ndarray,
     binary: np.ndarray,
@@ -443,12 +473,8 @@ def save_processed_images(
     contours: list[np.ndarray],
     labels: np.ndarray,
     component_count: int,
-) -> list[str]:
-    stage_dir = output_dir / "processed"
-    ensure_output_dir(stage_dir)
-    stem = output_stem(source_image, resolution, iteration)
-    saved_paths: list[Path] = []
-
+    resolution: Resolution,
+) -> dict[str, np.ndarray]:
     contour_overlay = loaded.copy()
     cv2.drawContours(contour_overlay, contours, -1, (0, 255, 255), max(1, min(resolution.width, resolution.height) // 900))
 
@@ -460,19 +486,42 @@ def save_processed_images(
         0,
     )
 
-    outputs = {
+    return {
         "gray": gray,
         "binary": binary,
         "morphology": morphed,
         "contours": contour_overlay,
         "components": component_overlay,
     }
+
+
+def write_processed_images(
+    output_dir: Path,
+    source_image: Path | None,
+    resolution: Resolution,
+    iteration: int,
+    outputs: dict[str, np.ndarray],
+) -> list[str]:
+    stage_dir = output_dir / "processed"
+    ensure_output_dir(stage_dir)
+    stem = output_stem(source_image, resolution, iteration)
+    saved_paths: list[Path] = []
+
     for stage_name, image in outputs.items():
         path = stage_dir / f"{stem}_{stage_name}.jpg"
         cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 92])
         saved_paths.append(path)
 
     return [str(path.resolve()) for path in saved_paths]
+
+
+def calculate_centroids(stats: np.ndarray) -> list[tuple[float, float]]:
+    centroids: list[tuple[float, float]] = []
+    for left, top, width, height, area in stats[1:]:
+        if area <= 0:
+            continue
+        centroids.append((left + (width / 2.0), top + (height / 2.0)))
+    return centroids
 
 
 def run_sample(
@@ -496,27 +545,26 @@ def run_sample(
         source = "synthetic"
         source_name = "generated"
 
+    input_read_ms = render_ms
     path = image_path(args.output_dir, resolution, iteration, args.format, source_image)
     image_size_bytes, write_ms = timed(lambda: write_image(path, image, args.format))
     loaded, read_ms = timed(lambda: read_image(path))
     gray, grayscale_ms = timed(lambda: cv2.cvtColor(loaded, cv2.COLOR_BGR2GRAY))
 
-    def threshold() -> np.ndarray:
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    blurred, gaussian_blur_ms = timed(lambda: cv2.GaussianBlur(gray, (5, 5), 0))
+
+    def otsu_threshold() -> np.ndarray:
         _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
         return binary
 
-    binary, threshold_ms = timed(threshold)
+    binary, otsu_threshold_ms = timed(otsu_threshold)
+    threshold_ms = gaussian_blur_ms + otsu_threshold_ms
 
     kernel_size = max(3, 2 * math.ceil(min(resolution.width, resolution.height) / 720) + 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-
-    def morphology() -> np.ndarray:
-        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
-        return closed
-
-    morphed, morphology_ms = timed(morphology)
+    opened, morphology_open_ms = timed(lambda: cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1))
+    morphed, morphology_close_ms = timed(lambda: cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2))
+    morphology_ms = morphology_open_ms + morphology_close_ms
 
     def contours() -> list[np.ndarray]:
         found, _hierarchy = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -524,33 +572,63 @@ def run_sample(
 
     found_contours, contours_ms = timed(contours)
 
-    def connected_components() -> tuple[int, np.ndarray]:
-        count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(morphed, 8, cv2.CV_32S)
-        return int(count), labels
+    def connected_components() -> tuple[int, np.ndarray, np.ndarray]:
+        count, labels, stats, _centroids = cv2.connectedComponentsWithStats(morphed, 8, cv2.CV_32S)
+        return int(count), labels, stats
 
     component_result, connected_components_ms = timed(connected_components)
-    component_count, labels = component_result
-    total_ms = (time.perf_counter() - total_start) * 1000.0
+    component_count, labels, stats = component_result
+    centroids, centroid_ms = timed(lambda: calculate_centroids(stats))
+    centroid_count = len(centroids)
+    centroid_avg_us = (centroid_ms * 1000.0 / centroid_count) if centroid_count else 0.0
+    centroid_rate_per_second = (centroid_count / (centroid_ms / 1000.0)) if centroid_ms > 0 else 0.0
+
+    preview_write_ms = 0.0
 
     if args.preview and iteration == 1:
         preview_path = args.output_dir / f"{output_stem(source_image, resolution, iteration)}_preview.jpg"
         preview = cv2.resize(loaded, preview_size(resolution.width, resolution.height))
-        cv2.imwrite(str(preview_path), preview, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        _ok, preview_write_ms = timed(
+            lambda: cv2.imwrite(str(preview_path), preview, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        )
+
+    stage_compute_ms = 0.0
+    stage_write_ms = 0.0
 
     if args.save_stages:
-        save_processed_images(
-            args.output_dir,
-            source_image,
-            resolution,
-            iteration,
-            loaded,
-            gray,
-            binary,
-            morphed,
-            found_contours,
-            labels,
-            component_count,
+        processed_images, stage_compute_ms = timed(
+            lambda: build_processed_images(
+                loaded,
+                gray,
+                binary,
+                morphed,
+                found_contours,
+                labels,
+                component_count,
+                resolution,
+            )
         )
+        _saved_paths, stage_write_ms = timed(
+            lambda: write_processed_images(
+                args.output_dir,
+                source_image,
+                resolution,
+                iteration,
+                processed_images,
+            )
+        )
+
+    core_compute_ms = (
+        grayscale_ms
+        + threshold_ms
+        + morphology_ms
+        + contours_ms
+        + connected_components_ms
+        + centroid_ms
+    )
+    output_write_ms = stage_write_ms + preview_write_ms
+    processed_pipeline_ms = core_compute_ms + stage_compute_ms + output_write_ms
+    total_ms = (time.perf_counter() - total_start) * 1000.0
 
     if not args.keep_images:
         try:
@@ -566,18 +644,35 @@ def run_sample(
         width=resolution.width,
         height=resolution.height,
         pixels=resolution.pixels,
+        input_read_ms=input_read_ms,
         render_ms=render_ms,
+        benchmark_write_ms=write_ms,
+        benchmark_read_ms=read_ms,
         write_ms=write_ms,
         read_ms=read_ms,
         grayscale_ms=grayscale_ms,
         threshold_ms=threshold_ms,
+        gaussian_blur_ms=gaussian_blur_ms,
+        otsu_threshold_ms=otsu_threshold_ms,
         morphology_ms=morphology_ms,
+        morphology_open_ms=morphology_open_ms,
+        morphology_close_ms=morphology_close_ms,
         contours_ms=contours_ms,
         connected_components_ms=connected_components_ms,
+        centroid_ms=centroid_ms,
+        centroid_avg_us=centroid_avg_us,
+        centroid_rate_per_second=centroid_rate_per_second,
+        core_compute_ms=core_compute_ms,
+        stage_compute_ms=stage_compute_ms,
+        stage_write_ms=stage_write_ms,
+        preview_write_ms=preview_write_ms,
+        output_write_ms=output_write_ms,
+        processed_pipeline_ms=processed_pipeline_ms,
         total_ms=total_ms,
         image_size_bytes=image_size_bytes,
         contours=len(found_contours),
         connected_components=component_count,
+        centroids=centroid_count,
         shapes_rendered=shape_count,
     )
 
@@ -604,6 +699,7 @@ def summarize(samples: list[SampleResult]) -> list[dict[str, int | float | str]]
             + sample.morphology_ms
             + sample.contours_ms
             + sample.connected_components_ms
+            + sample.centroid_ms
             for sample in group
         )
         megapixels_per_second = (pixels / 1_000_000.0) / (total_ms / 1000.0)
@@ -616,19 +712,42 @@ def summarize(samples: list[SampleResult]) -> list[dict[str, int | float | str]]
                 "height": group[0].height,
                 "iterations": len(group),
                 "avg_total_ms": round(total_ms, 3),
+                "avg_input_read_ms": round(mean(sample.input_read_ms for sample in group), 3),
                 "avg_render_ms": round(mean(sample.render_ms for sample in group), 3),
+                "avg_benchmark_write_ms": round(mean(sample.benchmark_write_ms for sample in group), 3),
+                "avg_benchmark_read_ms": round(mean(sample.benchmark_read_ms for sample in group), 3),
                 "avg_write_ms": round(mean(sample.write_ms for sample in group), 3),
                 "avg_read_ms": round(mean(sample.read_ms for sample in group), 3),
+                "avg_grayscale_ms": round(mean(sample.grayscale_ms for sample in group), 3),
                 "avg_threshold_ms": round(mean(sample.threshold_ms for sample in group), 3),
+                "avg_gaussian_blur_ms": round(mean(sample.gaussian_blur_ms for sample in group), 3),
+                "avg_otsu_threshold_ms": round(mean(sample.otsu_threshold_ms for sample in group), 3),
+                "avg_morphology_ms": round(mean(sample.morphology_ms for sample in group), 3),
+                "avg_morphology_open_ms": round(mean(sample.morphology_open_ms for sample in group), 3),
+                "avg_morphology_close_ms": round(mean(sample.morphology_close_ms for sample in group), 3),
                 "avg_contours_ms": round(mean(sample.contours_ms for sample in group), 3),
                 "avg_connected_components_ms": round(
                     mean(sample.connected_components_ms for sample in group), 3
+                ),
+                "avg_centroid_ms": round(mean(sample.centroid_ms for sample in group), 3),
+                "avg_centroid_avg_us": round(mean(sample.centroid_avg_us for sample in group), 3),
+                "avg_centroid_rate_per_second": round(
+                    mean(sample.centroid_rate_per_second for sample in group), 3
+                ),
+                "avg_core_compute_ms": round(mean(sample.core_compute_ms for sample in group), 3),
+                "avg_stage_compute_ms": round(mean(sample.stage_compute_ms for sample in group), 3),
+                "avg_stage_write_ms": round(mean(sample.stage_write_ms for sample in group), 3),
+                "avg_preview_write_ms": round(mean(sample.preview_write_ms for sample in group), 3),
+                "avg_output_write_ms": round(mean(sample.output_write_ms for sample in group), 3),
+                "avg_processed_pipeline_ms": round(
+                    mean(sample.processed_pipeline_ms for sample in group), 3
                 ),
                 "avg_image_size_kib": round(mean(sample.image_size_bytes for sample in group) / 1024.0, 1),
                 "avg_contours": round(mean(sample.contours for sample in group), 1),
                 "avg_connected_components": round(
                     mean(sample.connected_components for sample in group), 1
                 ),
+                "avg_centroids": round(mean(sample.centroids for sample in group), 1),
                 "total_megapixels_per_second": round(megapixels_per_second, 3),
                 "opencv_megapixels_per_second": round(cv_megapixels_per_second, 3),
             }
@@ -676,11 +795,16 @@ def print_summary(summary: list[dict[str, int | float | str]]) -> None:
     headers = (
         "resolution",
         "avg_total_ms",
-        "avg_write_ms",
-        "avg_read_ms",
+        "avg_input_read_ms",
+        "avg_benchmark_write_ms",
+        "avg_benchmark_read_ms",
+        "avg_core_compute_ms",
+        "avg_output_write_ms",
+        "avg_processed_pipeline_ms",
         "avg_threshold_ms",
         "avg_contours_ms",
         "avg_connected_components_ms",
+        "avg_centroid_ms",
         "opencv_megapixels_per_second",
     )
     widths = {
@@ -736,9 +860,14 @@ def main() -> int:
                     print(
                         f"  #{iteration}: {sample.width}x{sample.height}, "
                         f"total={sample.total_ms:.1f} ms, "
-                        f"write={sample.write_ms:.1f} ms, read={sample.read_ms:.1f} ms, "
+                        f"input={sample.input_read_ms:.1f} ms, "
+                        f"benchmark_write={sample.benchmark_write_ms:.1f} ms, "
+                        f"benchmark_read={sample.benchmark_read_ms:.1f} ms, "
+                        f"core={sample.core_compute_ms:.1f} ms, "
+                        f"output={sample.output_write_ms:.1f} ms, "
                         f"threshold={sample.threshold_ms:.1f} ms, "
-                        f"components={sample.connected_components_ms:.1f} ms"
+                        f"components={sample.connected_components_ms:.1f} ms, "
+                        f"centroids={sample.centroid_ms:.3f} ms"
                     )
         else:
             for resolution in args.resolutions:
@@ -752,9 +881,14 @@ def main() -> int:
                     samples.append(sample)
                     print(
                         f"  #{iteration}: total={sample.total_ms:.1f} ms, "
-                        f"write={sample.write_ms:.1f} ms, read={sample.read_ms:.1f} ms, "
+                        f"input={sample.input_read_ms:.1f} ms, "
+                        f"benchmark_write={sample.benchmark_write_ms:.1f} ms, "
+                        f"benchmark_read={sample.benchmark_read_ms:.1f} ms, "
+                        f"core={sample.core_compute_ms:.1f} ms, "
+                        f"output={sample.output_write_ms:.1f} ms, "
                         f"threshold={sample.threshold_ms:.1f} ms, "
-                        f"components={sample.connected_components_ms:.1f} ms"
+                        f"components={sample.connected_components_ms:.1f} ms, "
+                        f"centroids={sample.centroid_ms:.3f} ms"
                     )
     except KeyboardInterrupt:
         print("\nInterrupted by user.", file=sys.stderr)

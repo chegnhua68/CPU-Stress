@@ -13,6 +13,7 @@
 - 测试形态学开闭运算
 - 测试 `cv2.findContours` 形状/轮廓提取
 - 测试 `cv2.connectedComponentsWithStats` 连通域分析
+- 测试每个连通域质心计算速度
 - 输出 CSV 和 JSON 报告，便于后续对比不同机器
 
 ## 安装
@@ -32,22 +33,12 @@ python -m pip install -r requirements.txt
 python3.11 check_env.py
 ```
 
-如果是在 Windows 上准备环境，且 Python 3.11 由 Scoop 安装在 E 盘，可先确认路径：
-
-```powershell
-E:\Software\Scoop\Apps\apps\python311\current\python.exe --version
-E:\Software\Scoop\Apps\apps\python311\current\python.exe check_env.py
-```
-
 实际压力测试建议在目标 Linux 设备上运行，这样结果才反映设备自身 CPU、内存和存储 I/O 表现。
 
-如果当前 Windows 机器只有 Scoop 的新版 Python，例如 Python 3.14，而 NumPy/OpenCV wheel 不稳定，请不要用它作为最终测试环境；在 Linux 目标机上使用 Python 3.11 虚拟环境更可靠。
+在 Linux 目标机上使用 Python 3.11 虚拟环境更可靠。
 
 在你当前这台 Windows 机器上，也可以直接用 Scoop 的 Python 3.11 做功能验证。默认会读取 `pictures/` 中的原图分辨率：
 
-```powershell
-E:\Software\Scoop\Apps\apps\python311\current\python.exe cpu_stress_opencv.py -n 3
-```
 
 ## 快速运行
 
@@ -132,6 +123,33 @@ resolution avg_total_ms avg_write_ms avg_read_ms avg_threshold_ms ...
 ```
 
 其中 `opencv_megapixels_per_second` 越高，说明 OpenCV 纯图像处理阶段吞吐越好；`avg_write_ms` 和 `avg_read_ms` 则更受存储和文件格式影响。
+
+报告中会细分这些阶段：
+
+```text
+input_read_ms                 原始图片读入时间
+benchmark_write_ms            基准测试图片写盘时间
+benchmark_read_ms             基准测试图片读回时间
+grayscale_ms                  灰度转换时间
+gaussian_blur_ms              高斯模糊时间
+otsu_threshold_ms             Otsu 二值化时间
+threshold_ms                  高斯模糊 + Otsu 二值化总时间
+morphology_open_ms            形态学开运算时间
+morphology_close_ms           形态学闭运算时间
+morphology_ms                 形态学总时间
+contours_ms                   轮廓提取时间
+connected_components_ms       连通域分析时间
+centroid_ms                   连通域质心计算总时间
+centroid_avg_us               每个质心平均计算时间，单位微秒
+centroid_rate_per_second      每秒可计算质心数量
+core_compute_ms               灰度 + 二值化 + 形态学 + 轮廓 + 连通域 + 质心计算总时间
+stage_compute_ms              处理结果图生成时间
+stage_write_ms                处理结果图写盘时间
+preview_write_ms              预览图写盘时间
+output_write_ms               处理结果图 + 预览图输出时间
+processed_pipeline_ms         核心计算 + 处理图生成 + 处理图输出总时间
+total_ms                      本轮完整耗时
+```
 
 ## 参数
 
