@@ -33,6 +33,12 @@ python -m pip install -r requirements.txt
 python3.11 check_env.py
 ```
 
+如果需要生成函数级 profile 报告，可额外安装诊断依赖：
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
 实际压力测试建议在目标 Linux 设备上运行，这样结果才反映设备自身 CPU、内存和存储 I/O 表现。
 
 在 Linux 目标机上使用 Python 3.11 虚拟环境更可靠。
@@ -80,6 +86,18 @@ python3.11 cpu_stress_opencv.py --preview --keep-images
 python3.11 cpu_stress_opencv.py -n 1 --save-stages --preview
 ```
 
+生成 pyinstrument HTML profile 报告：
+
+```bash
+python3.11 cpu_stress_opencv.py -n 1 --format jpg --save-stages --preview --profile
+```
+
+默认输出：
+
+```text
+benchmark_output/profile.html
+```
+
 限制 OpenCV 线程数，便于做单线程或固定线程对比：
 
 ```bash
@@ -112,6 +130,7 @@ python3.11 cpu_stress_opencv.py --synthetic -r 720p 1080p -n 3
 - `report.json`：机器信息、汇总结果、详细样本
 - `preview_*.jpg`：使用 `--preview` 时生成的预览图
 - `processed/*.jpg`：使用 `--save-stages` 时生成的处理结果图
+- `profile.html`：使用 `--profile` 时生成的 pyinstrument 函数级 profile 报告
 
 终端中会显示类似：
 
@@ -167,6 +186,8 @@ total_ms                      本轮完整耗时
 --keep-images        保留每轮生成的图片
 --preview            每个分辨率保存一张预览图
 --save-stages        保存灰度、二值化、形态学、轮廓、连通域处理结果图
+--profile            使用 pyinstrument 生成 HTML profile 报告
+--profile-output     指定 profile HTML 输出路径
 --json               指定 JSON 报告路径
 --csv                指定 CSV 报告路径
 ```

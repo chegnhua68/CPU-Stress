@@ -252,6 +252,17 @@ def parse_args() -> argparse.Namespace:
         help="save processed images: grayscale, binary, morphology, contours, and components",
     )
     parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="run the benchmark under pyinstrument and write an HTML profile report",
+    )
+    parser.add_argument(
+        "--profile-output",
+        type=Path,
+        default=None,
+        help="optional pyinstrument HTML report path, default is OUTPUT_DIR/profile.html",
+    )
+    parser.add_argument(
         "--json",
         type=Path,
         default=None,
@@ -819,8 +830,7 @@ def print_summary(summary: list[dict[str, int | float | str]]) -> None:
         print(" ".join(str(row[header]).ljust(widths[header]) for header in headers))
 
 
-def main() -> int:
-    args = parse_args()
+def run_benchmark(args: argparse.Namespace) -> int:
     ensure_output_dir(args.output_dir)
 
     if args.threads:
@@ -908,6 +918,42 @@ def main() -> int:
     print(f"\nCSV report: {csv_path.resolve()}")
     print(f"JSON report: {json_path.resolve()}")
     return 0
+
+
+def write_profile_report(args: argparse.Namespace, profiler: object) -> Path:
+    profile_path = args.profile_output or args.output_dir / "profile.html"
+    ensure_output_dir(profile_path.parent)
+    html = profiler.output_html()
+    profile_path.write_text(html, encoding="utf-8")
+    return profile_path
+
+
+def main() -> int:
+    args = parse_args()
+
+    if not args.profile:
+        return run_benchmark(args)
+
+    try:
+        from pyinstrument import Profiler
+    except ImportError:
+        print(
+            "pyinstrument is not installed. Install it with: "
+            "python -m pip install -r requirements-dev.txt",
+            file=sys.stderr,
+        )
+        return 2
+
+    profiler = Profiler()
+    profiler.start()
+    try:
+        exit_code = run_benchmark(args)
+    finally:
+        profiler.stop()
+
+    profile_path = write_profile_report(args, profiler)
+    print(f"Pyinstrument profile: {profile_path.resolve()}")
+    return exit_code
 
 
 if __name__ == "__main__":

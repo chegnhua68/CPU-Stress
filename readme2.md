@@ -82,6 +82,12 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
 
+如果需要生成函数级 profile 报告，额外安装：
+
+```fish
+python -m pip install -r requirements-dev.txt
+```
+
 ## 4. 检查 OpenCV 环境
 
 运行环境检查：
@@ -156,6 +162,12 @@ python cpu_stress_opencv.py --source-image pictures/DSC_5101.JPG -n 1
 python cpu_stress_opencv.py -n 1 --save-stages --preview
 ```
 
+如果还想生成 pyinstrument HTML profile：
+
+```fish
+python cpu_stress_opencv.py -n 1 --format jpg --save-stages --preview --profile
+```
+
 输出目录默认为：
 
 ```text
@@ -169,6 +181,7 @@ benchmark_output/report.json       机器信息和汇总报告
 benchmark_output/samples.csv       每次测试的详细耗时
 benchmark_output/*_preview.jpg     预览图
 benchmark_output/processed/*.jpg   处理后的图片
+benchmark_output/profile.html      pyinstrument 函数级 profile 报告
 ```
 
 `processed/` 中会包含：
@@ -218,6 +231,12 @@ python cpu_stress_opencv.py -n 3 --format jpg --save-stages --preview
 python cpu_stress_opencv.py -n 3 --format jpg
 ```
 
+如果要同时保存处理图和 profile：
+
+```fish
+python cpu_stress_opencv.py -n 1 --format jpg --save-stages --preview --profile
+```
+
 ## 9. 查看测试结果
 
 查看终端输出中的 Summary：
@@ -255,6 +274,7 @@ git pull
 ```fish
 source .venv/bin/activate.fish
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 ## 11. 常见问题
