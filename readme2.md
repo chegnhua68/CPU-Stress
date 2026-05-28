@@ -201,6 +201,8 @@ input_read_ms             原图读入时间
 benchmark_write_ms        基准图片写盘时间
 benchmark_read_ms         基准图片读回时间
 core_compute_ms           灰度、二值化、形态学、轮廓、连通域、质心计算总时间
+cpu_cores                 系统检测到的 CPU 核心/逻辑处理器数量
+opencv_threads            OpenCV 当前使用的线程数
 stage_compute_ms          灰度图、二值图、轮廓图、连通域伪彩图等结果图生成时间
 stage_write_ms            处理结果图写盘时间
 output_write_ms           处理结果图和预览图输出时间

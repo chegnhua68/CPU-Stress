@@ -156,6 +156,8 @@ threshold_ms                  高斯模糊 + Otsu 二值化总时间
 morphology_open_ms            形态学开运算时间
 morphology_close_ms           形态学闭运算时间
 morphology_ms                 形态学总时间
+cpu_cores                     系统检测到的 CPU 核心/逻辑处理器数量
+opencv_threads                OpenCV 当前使用的线程数
 contours_ms                   轮廓提取时间
 connected_components_ms       连通域分析时间
 centroid_ms                   连通域质心计算总时间

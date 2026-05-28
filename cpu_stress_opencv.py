@@ -60,6 +60,8 @@ class SampleResult:
     width: int
     height: int
     pixels: int
+    cpu_cores: int
+    opencv_threads: int
     input_read_ms: float
     render_ms: float
     benchmark_write_ms: float
@@ -100,6 +102,8 @@ class SampleResult:
             "width": self.width,
             "height": self.height,
             "pixels": self.pixels,
+            "cpu_cores": self.cpu_cores,
+            "opencv_threads": self.opencv_threads,
             "input_read_ms": round(self.input_read_ms, 3),
             "render_ms": round(self.render_ms, 3),
             "benchmark_write_ms": round(self.benchmark_write_ms, 3),
@@ -655,6 +659,8 @@ def run_sample(
         width=resolution.width,
         height=resolution.height,
         pixels=resolution.pixels,
+        cpu_cores=os.cpu_count() or 0,
+        opencv_threads=cv2.getNumThreads(),
         input_read_ms=input_read_ms,
         render_ms=render_ms,
         benchmark_write_ms=write_ms,
@@ -703,6 +709,8 @@ def summarize(samples: list[SampleResult]) -> list[dict[str, int | float | str]]
 
     for resolution, group in by_resolution.items():
         pixels = group[0].pixels
+        cpu_cores = group[0].cpu_cores
+        opencv_threads = group[0].opencv_threads
         total_ms = mean(sample.total_ms for sample in group)
         cv_ms = mean(
             sample.grayscale_ms
@@ -721,6 +729,8 @@ def summarize(samples: list[SampleResult]) -> list[dict[str, int | float | str]]
                 "resolution": resolution,
                 "width": group[0].width,
                 "height": group[0].height,
+                "cpu_cores": cpu_cores,
+                "opencv_threads": opencv_threads,
                 "iterations": len(group),
                 "avg_total_ms": round(total_ms, 3),
                 "avg_input_read_ms": round(mean(sample.input_read_ms for sample in group), 3),
@@ -802,32 +812,70 @@ def write_json(
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def print_summary(summary: list[dict[str, int | float | str]]) -> None:
-    headers = (
-        "resolution",
-        "avg_total_ms",
-        "avg_input_read_ms",
-        "avg_benchmark_write_ms",
-        "avg_benchmark_read_ms",
-        "avg_core_compute_ms",
-        "avg_output_write_ms",
-        "avg_processed_pipeline_ms",
-        "avg_threshold_ms",
-        "avg_contours_ms",
-        "avg_connected_components_ms",
-        "avg_centroid_ms",
-        "opencv_megapixels_per_second",
-    )
-    widths = {
-        header: max(len(header), *(len(str(row[header])) for row in summary))
-        for header in headers
-    }
+def print_sample_result(sample: SampleResult, title: str | None = None) -> None:
+    if title:
+        print()
+        print(title)
+
+    print(f"图片: {sample.source_image}")
+    print(f"分辨率: {sample.width}x{sample.height}")
+    print(f"CPU 核心/逻辑处理器: {sample.cpu_cores}")
+    print(f"OpenCV threads: {sample.opencv_threads}")
     print()
-    print("Summary")
-    print(" ".join(header.ljust(widths[header]) for header in headers))
-    print(" ".join("-" * widths[header] for header in headers))
+    print(f"总耗时: {sample.total_ms:.3f} ms")
+    print(f"输入读图: {sample.input_read_ms:.3f} ms")
+    print(f"基准写图: {sample.benchmark_write_ms:.3f} ms")
+    print(f"基准读图: {sample.benchmark_read_ms:.3f} ms")
+    print(f"核心 OpenCV 计算: {sample.core_compute_ms:.3f} ms")
+    print(f"输出处理图: {sample.output_write_ms:.3f} ms")
+    print(f"完整处理流水线: {sample.processed_pipeline_ms:.3f} ms")
+    print()
+    print(f"Gaussian blur: {sample.gaussian_blur_ms:.3f} ms")
+    print(f"Otsu 二值化: {sample.otsu_threshold_ms:.3f} ms")
+    print(f"二值化总耗时: {sample.threshold_ms:.3f} ms")
+    print(f"形态学总耗时: {sample.morphology_ms:.3f} ms")
+    print(f"轮廓提取: {sample.contours_ms:.3f} ms")
+    print(f"连通域分析: {sample.connected_components_ms:.3f} ms")
+    print(f"质心计算: {sample.centroid_ms:.3f} ms")
+    print()
+    print(f"轮廓数: {sample.contours}")
+    print(f"连通域数量: {sample.connected_components}")
+    print(f"质心数量: {sample.centroids}")
+    print(
+        "OpenCV 吞吐: "
+        f"{sample.pixels / 1_000_000.0 / (sample.core_compute_ms / 1000.0):.3f} MP/s"
+    )
+
+
+def print_summary(summary: list[dict[str, int | float | str]]) -> None:
     for row in summary:
-        print(" ".join(str(row[header]).ljust(widths[header]) for header in headers))
+        print()
+        print("平均结果")
+        print(f"分辨率: {row['width']}x{row['height']}")
+        print(f"迭代次数: {row['iterations']}")
+        print(f"CPU 核心/逻辑处理器: {row['cpu_cores']}")
+        print(f"OpenCV threads: {row['opencv_threads']}")
+        print()
+        print(f"平均总耗时: {row['avg_total_ms']} ms")
+        print(f"平均输入读图: {row['avg_input_read_ms']} ms")
+        print(f"平均基准写图: {row['avg_benchmark_write_ms']} ms")
+        print(f"平均基准读图: {row['avg_benchmark_read_ms']} ms")
+        print(f"平均核心 OpenCV 计算: {row['avg_core_compute_ms']} ms")
+        print(f"平均输出处理图: {row['avg_output_write_ms']} ms")
+        print(f"平均完整处理流水线: {row['avg_processed_pipeline_ms']} ms")
+        print()
+        print(f"平均 Gaussian blur: {row['avg_gaussian_blur_ms']} ms")
+        print(f"平均 Otsu 二值化: {row['avg_otsu_threshold_ms']} ms")
+        print(f"平均二值化总耗时: {row['avg_threshold_ms']} ms")
+        print(f"平均形态学总耗时: {row['avg_morphology_ms']} ms")
+        print(f"平均轮廓提取: {row['avg_contours_ms']} ms")
+        print(f"平均连通域分析: {row['avg_connected_components_ms']} ms")
+        print(f"平均质心计算: {row['avg_centroid_ms']} ms")
+        print()
+        print(f"平均轮廓数: {row['avg_contours']}")
+        print(f"平均连通域数量: {row['avg_connected_components']}")
+        print(f"平均质心数量: {row['avg_centroids']}")
+        print(f"平均 OpenCV 吞吐: {row['opencv_megapixels_per_second']} MP/s")
 
 
 def run_benchmark(args: argparse.Namespace) -> int:
@@ -863,43 +911,17 @@ def run_benchmark(args: argparse.Namespace) -> int:
     try:
         if source_images:
             for source_image in source_images:
-                print(f"\nTesting image {source_image}")
                 for iteration in range(1, args.iterations + 1):
                     sample = run_sample(args.resolutions[0], iteration, args, rng, source_image)
                     samples.append(sample)
-                    print(
-                        f"  #{iteration}: {sample.width}x{sample.height}, "
-                        f"total={sample.total_ms:.1f} ms, "
-                        f"input={sample.input_read_ms:.1f} ms, "
-                        f"benchmark_write={sample.benchmark_write_ms:.1f} ms, "
-                        f"benchmark_read={sample.benchmark_read_ms:.1f} ms, "
-                        f"core={sample.core_compute_ms:.1f} ms, "
-                        f"output={sample.output_write_ms:.1f} ms, "
-                        f"threshold={sample.threshold_ms:.1f} ms, "
-                        f"components={sample.connected_components_ms:.1f} ms, "
-                        f"centroids={sample.centroid_ms:.3f} ms"
-                    )
+                    print_sample_result(sample, f"测试结果 #{iteration}")
         else:
             for resolution in args.resolutions:
                 shape_count = shape_count_for_resolution(args.shapes, resolution)
-                print(
-                    f"\nTesting synthetic {resolution.name} "
-                    f"({resolution.width}x{resolution.height}, {shape_count} shapes)"
-                )
                 for iteration in range(1, args.iterations + 1):
                     sample = run_sample(resolution, iteration, args, rng, None)
                     samples.append(sample)
-                    print(
-                        f"  #{iteration}: total={sample.total_ms:.1f} ms, "
-                        f"input={sample.input_read_ms:.1f} ms, "
-                        f"benchmark_write={sample.benchmark_write_ms:.1f} ms, "
-                        f"benchmark_read={sample.benchmark_read_ms:.1f} ms, "
-                        f"core={sample.core_compute_ms:.1f} ms, "
-                        f"output={sample.output_write_ms:.1f} ms, "
-                        f"threshold={sample.threshold_ms:.1f} ms, "
-                        f"components={sample.connected_components_ms:.1f} ms, "
-                        f"centroids={sample.centroid_ms:.3f} ms"
-                    )
+                    print_sample_result(sample, f"测试结果 #{iteration}")
     except KeyboardInterrupt:
         print("\nInterrupted by user.", file=sys.stderr)
         return 130
